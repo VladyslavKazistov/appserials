@@ -16,7 +16,7 @@ const S = {
   minVotes: LS.get("minVotes", 20),
   notify: LS.get("notify", false),
   genres: LS.get("genres", []),
-  period: LS.get("period", { mode: "recent" }), // recent | month (ym: "2026-01") | range (from, to)          // ключи из GENRES; пусто = все жанры
+  period: LS.get("period", { mode: "month" }), // month (ym: "2026-01", пусто = текущий месяц) | range (from, to)          // ключи из GENRES; пусто = все жанры
   favs: LS.get("favs", []),             // [{kind,id,title,poster,date,seen}]
   seen: LS.get("seen", {}),             // id -> время, когда новинку впервые показали
   tab: "new",
@@ -72,6 +72,9 @@ async function keywordIds(names) {
   return [...new Set(names.flatMap(n => cache[n] || []))];
 }
 const genreNames = () => GENRES.filter(g => S.genres.includes(g.k)).map(g => g.n.toLowerCase()).join(", ");
+// Старый режим «последние N дней» убран: переводим на «Месяц» (текущий).
+if (S.period.mode !== "month" && S.period.mode !== "range") S.period = { ...S.period, mode: "month" };
+const curYM = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const save = (...keys) => keys.forEach(k => LS.set(k, S[k]));
 
 const $ = s => document.querySelector(s);
@@ -180,19 +183,16 @@ const MONTHS = ["январь", "февраль", "март", "апрель", "�
 // Диапазон дат для экрана «Новинки» по выбранному периоду.
 function periodRange() {
   const p = S.period;
-  if (p.mode === "month" && p.ym) {
-    const [y, m] = p.ym.split("-").map(Number);
-    const last = new Date(y, m, 0).getDate();
-    return [`${p.ym}-01`, `${p.ym}-${String(last).padStart(2, "0")}`];
-  }
   if (p.mode === "range" && p.from && p.to) return p.from <= p.to ? [p.from, p.to] : [p.to, p.from];
-  return [iso(addDays(-S.days)), iso(new Date())];
+  const ym = p.ym || curYM();
+  const [y, m] = ym.split("-").map(Number);
+  const last = new Date(y, m, 0).getDate();
+  return [`${ym}-01`, `${ym}-${String(last).padStart(2, "0")}`];
 }
 function periodLabel() {
   const p = S.period;
-  if (p.mode === "month" && p.ym) { const [y, m] = p.ym.split("-"); return `в ${MONTHS_IN[+m - 1]} ${y}`; }
   if (p.mode === "range" && p.from && p.to) { const [a, b] = periodRange(); return `с ${fmtDate(a)} по ${fmtDate(b)}`; }
-  return `за ${S.days} дн.`;
+  const [y, m] = (p.ym || curYM()).split("-"); return `в ${MONTHS_IN[+m - 1]} ${y}`;
 }
 
 async function freshReleases(range) {
@@ -232,7 +232,7 @@ function periodBar(withKinds = true) {
       <select id="pmYear">${years.map(y => `<option ${+cy === y ? "selected" : ""}>${y}</option>`).join("")}</select></div>`;
   if (p.mode === "range") extra = `<div class="row" style="margin-bottom:12px">
       <input type="date" id="pmFrom" value="${p.from || iso(addDays(-30))}"><span style="color:var(--muted)">–</span><input type="date" id="pmTo" value="${p.to || iso(new Date())}"></div>`;
-  return `<div class="seg">${btn("recent", `Последние ${S.days} дн.`)}${btn("month", "📅 Месяц")}${btn("range", "Период")}</div>${extra}
+  return `<div class="seg">${btn("month", "📅 Месяц")}${btn("range", "Период")}</div>${extra}
     ${withKinds ? `<div class="seg">${kbtn("all", "Всё")}${kbtn("movie", "🎬 Фильмы")}${kbtn("tv", "📺 Сериалы")}</div>` : ""}`;
 }
 // Обработчики фильтра периода повешены на весь экран один раз (делегирование),
@@ -242,9 +242,8 @@ function onPeriodClick(e) {
   const pm = e.target.closest("[data-pm]");
   if (pm) {
     const m = pm.dataset.pm, now = new Date();
-    if (m === "month") setPeriod({ ...S.period, mode: "month", ym: S.period.ym || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}` });
+    if (m === "month") setPeriod({ ...S.period, mode: "month" });
     else if (m === "range") setPeriod({ ...S.period, mode: "range", from: S.period.from || iso(addDays(-30)), to: S.period.to || iso(now) });
-    else setPeriod({ ...S.period, mode: "recent" });
     return true;
   }
   const kk = e.target.closest("[data-kk]");
@@ -283,7 +282,7 @@ const views = {
     save("seen");
     setBadge(0);
     v.innerHTML = installHint() + bar + (items.length
-      ? grid(items, i => ({ isNew: S.period.mode === "recent" && freshIds.has(itemKey(i)) }))
+      ? grid(items, i => ({ isNew: freshIds.has(itemKey(i)) }))
       : `<div class="empty">Не нашлось ничего, что вышло ${periodLabel()}, с оценкой от <b>${S.rating}</b>${S.genres.length ? ` в жанрах: ${genreNames()}` : ""}.<br><br>Попробуйте понизить порог или выбрать другие жанры в настройках.</div>`);
   },
 
@@ -361,11 +360,7 @@ const views = {
       <div class="field">
         <label>Период для «Новинок»</label>
         ${periodBar(false)}
-        <div class="hint">«Последние дни» — свежие релизы (их длина задаётся ниже). «Месяц» — всё, что вышло в выбранном месяце. «Период» — свои даты «с» и «по», например с 1 января по 1 февраля.</div>
-      </div>
-      <div class="field">
-        <label>Новинки за последние</label>
-        <select id="days">${[7, 14, 30, 60, 90].map(d => `<option value="${d}" ${d === S.days ? "selected" : ""}>${d} дней</option>`).join("")}</select>
+        <div class="hint">По умолчанию — текущий месяц. «Месяц» — всё, что вышло в выбранном месяце. «Период» — свои даты «с» и «по», например с 1 января по 1 февраля.</div>
       </div>
       <div class="field">
         <label>Минимум голосов</label>
@@ -401,7 +396,6 @@ const views = {
       save("genres"); gmark();
     });
     $("#gclear").onclick = e => { e.preventDefault(); S.genres = []; save("genres"); gmark(); toast("Показываю все жанры"); };
-    $("#days").onchange = e => { S.days = +e.target.value; save("days"); };
     $("#minVotes").onchange = e => { S.minVotes = +e.target.value; save("minVotes"); };
     $("#saveKey").onclick = async () => {
       S.key = $("#key").value.trim(); save("key");
