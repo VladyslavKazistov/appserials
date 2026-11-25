@@ -16,7 +16,8 @@ const S = {
   minVotes: LS.get("minVotes", 20),
   notify: LS.get("notify", false),
   hideRuAsia: LS.get("hideRuAsia", true), // скрывать российские, турецкие и азиатские фильмы/сериалы
-  genres: LS.get("genres", []),          // ключи из GENRES; пусто = все жанры
+  genres: LS.get("genres", []),
+  period: LS.get("period", { mode: "recent" }), // recent | month (ym: "2026-01") | range (from, to)          // ключи из GENRES; пусто = все жанры
   favs: LS.get("favs", []),             // [{kind,id,title,poster,date,seen}]
   seen: LS.get("seen", {}),             // id -> время, когда новинку впервые показали
   tab: "new",
@@ -137,8 +138,28 @@ async function discover(kind, from, to, withRating, pages = 3) {
   return out;
 }
 
-async function freshReleases() {
-  const from = iso(addDays(-S.days)), to = iso(new Date());
+const MONTHS_IN = ["январе", "феврале", "марте", "апреле", "мае", "июне", "июле", "августе", "сентябре", "октябре", "ноябре", "декабре"];
+const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
+// Диапазон дат для экрана «Новинки» по выбранному периоду.
+function periodRange() {
+  const p = S.period;
+  if (p.mode === "month" && p.ym) {
+    const [y, m] = p.ym.split("-").map(Number);
+    const last = new Date(y, m, 0).getDate();
+    return [`${p.ym}-01`, `${p.ym}-${String(last).padStart(2, "0")}`];
+  }
+  if (p.mode === "range" && p.from && p.to) return p.from <= p.to ? [p.from, p.to] : [p.to, p.from];
+  return [iso(addDays(-S.days)), iso(new Date())];
+}
+function periodLabel() {
+  const p = S.period;
+  if (p.mode === "month" && p.ym) { const [y, m] = p.ym.split("-"); return `в ${MONTHS_IN[+m - 1]} ${y}`; }
+  if (p.mode === "range" && p.from && p.to) { const [a, b] = periodRange(); return `с ${fmtDate(a)} по ${fmtDate(b)}`; }
+  return `за ${S.days} дн.`;
+}
+
+async function freshReleases(range) {
+  const [from, to] = range || [iso(addDays(-S.days)), iso(new Date())];
   const kinds = S.kinds === "all" ? ["movie", "tv"] : [S.kinds];
   const lists = await Promise.all(kinds.map(k => discover(k, from, to, true)));
   return lists.flat().sort((a, b) => b.vote - a.vote);
@@ -161,13 +182,46 @@ function errorView(e) {
   return `<div class="empty"><b>Не удалось загрузить данные</b><br><br>${esc(e.message)}<br>Проверьте интернет. Если TMDB не открывается у вашего провайдера, может понадобиться VPN.</div>`;
 }
 
+// ---------- фильтр по датам ----------
+function periodBar() {
+  const p = S.period, now = new Date();
+  const [cy, cm] = (p.ym || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`).split("-");
+  const years = []; for (let y = now.getFullYear() + 1; y >= 1990; y--) years.push(y);
+  const btn = (k, t) => `<button data-pm="${k}" class="${p.mode === k ? "on" : ""}">${t}</button>`;
+  const kbtn = (k, t) => `<button data-kk="${k}" class="${S.kinds === k ? "on" : ""}">${t}</button>`;
+  let extra = "";
+  if (p.mode === "month") extra = `<div class="row" style="margin-bottom:12px">
+      <select id="pmMonth">${MONTHS.map((n, i) => `<option value="${String(i + 1).padStart(2, "0")}" ${+cm === i + 1 ? "selected" : ""}>${n[0].toUpperCase() + n.slice(1)}</option>`).join("")}</select>
+      <select id="pmYear">${years.map(y => `<option ${+cy === y ? "selected" : ""}>${y}</option>`).join("")}</select></div>`;
+  if (p.mode === "range") extra = `<div class="row" style="margin-bottom:12px">
+      <input type="date" id="pmFrom" value="${p.from || iso(addDays(-30))}"><span style="color:var(--muted)">–</span><input type="date" id="pmTo" value="${p.to || iso(new Date())}"></div>`;
+  return `<div class="seg">${btn("recent", `Последние ${S.days} дн.`)}${btn("month", "📅 Месяц")}${btn("range", "Период")}</div>${extra}
+    <div class="seg">${kbtn("all", "Всё")}${kbtn("movie", "🎬 Фильмы")}${kbtn("tv", "📺 Сериалы")}</div>`;
+}
+function bindPeriodBar(v) {
+  const setP = np => { S.period = np; save("period"); render(); };
+  v.querySelectorAll("[data-pm]").forEach(b => b.onclick = () => {
+    const m = b.dataset.pm, now = new Date();
+    if (m === "month") setP({ mode: "month", ym: S.period.ym || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}` });
+    else if (m === "range") setP({ mode: "range", from: S.period.from || iso(addDays(-30)), to: S.period.to || iso(now) });
+    else setP({ mode: "recent" });
+  });
+  v.querySelectorAll("[data-kk]").forEach(b => b.onclick = () => { S.kinds = b.dataset.kk; save("kinds"); render(); });
+  const mo = v.querySelector("#pmMonth"), yr = v.querySelector("#pmYear");
+  if (mo && yr) mo.onchange = yr.onchange = () => setP({ ...S.period, mode: "month", ym: `${yr.value}-${mo.value}` });
+  const f = v.querySelector("#pmFrom"), t = v.querySelector("#pmTo");
+  if (f && t) f.onchange = t.onchange = () => { if (f.value && t.value) setP({ ...S.period, mode: "range", from: f.value, to: t.value }); };
+}
+
 // ---------- экраны ----------
 const views = {
   async new(v) {
     $("#title").textContent = "Новинки";
-    $("#sub").textContent = `Вышли за ${S.days} дн. · оценка от ${S.rating}` + (S.genres.length ? ` · ${genreNames()}` : "");
-    v.innerHTML = installHint() + spinner();
-    const items = await freshReleases();
+    $("#sub").textContent = `Вышли ${periodLabel()} · оценка от ${S.rating}` + (S.genres.length ? ` · ${genreNames()}` : "");
+    const bar = periodBar();
+    v.innerHTML = installHint() + bar + spinner();
+    bindPeriodBar(v);
+    const items = await freshReleases(periodRange());
     const now = Date.now();
     const freshIds = new Set();
     for (const it of items) {
@@ -177,9 +231,10 @@ const views = {
     }
     save("seen");
     setBadge(0);
-    v.innerHTML = installHint() + (items.length
-      ? grid(items, i => ({ isNew: freshIds.has(i.kind + i.id) }))
-      : `<div class="empty">За последние ${S.days} дней нет новинок с оценкой от <b>${S.rating}</b>${S.genres.length ? ` в жанрах: ${genreNames()}` : ""}.<br><br>Попробуйте понизить порог или выбрать другие жанры в настройках.</div>`);
+    bindPeriodBar(v);
+    v.innerHTML = installHint() + bar + (items.length
+      ? grid(items, i => ({ isNew: S.period.mode === "recent" && freshIds.has(i.kind + i.id) }))
+      : `<div class="empty">Не нашлось ничего, что вышло ${periodLabel()}, с оценкой от <b>${S.rating}</b>${S.genres.length ? ` в жанрах: ${genreNames()}` : ""}.<br><br>Попробуйте понизить порог или выбрать другие жанры в настройках.</div>`);
   },
 
   async soon(v) {

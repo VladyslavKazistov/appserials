@@ -55,3 +55,5 @@ input[type=range]{width:100%;accent-color:var(--acc)}
 .install{background:linear-gradient(135deg,#2a2f3a,#1a1d24);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:12px;font-size:14px}
 .gchip{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:16px;padding:6px 12px;font-size:14px}
 .gchip.on{background:var(--acc);color:#111;border-color:var(--acc);font-weight:600}
+input[type=date]{flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:16px;color-scheme:dark}
+.row select{flex:1}
