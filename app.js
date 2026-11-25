@@ -231,10 +231,10 @@ const views = {
     }
     save("seen");
     setBadge(0);
-    bindPeriodBar(v);
     v.innerHTML = installHint() + bar + (items.length
       ? grid(items, i => ({ isNew: S.period.mode === "recent" && freshIds.has(i.kind + i.id) }))
       : `<div class="empty">Не нашлось ничего, что вышло ${periodLabel()}, с оценкой от <b>${S.rating}</b>${S.genres.length ? ` в жанрах: ${genreNames()}` : ""}.<br><br>Попробуйте понизить порог или выбрать другие жанры в настройках.</div>`);
+    bindPeriodBar(v); // кнопки создаются заново, поэтому подключаем обработчики после отрисовки
   },
 
   async soon(v) {
