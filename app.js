@@ -1,0 +1,355 @@
+"use strict";
+/* Премьеры — PWA-напоминалка о новых фильмах и сериалах (данные TMDB). */
+
+const API = "https://api.themoviedb.org/3";
+const IMG = "https://image.tmdb.org/t/p/";
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem("pr_" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { localStorage.setItem("pr_" + k, JSON.stringify(v)); },
+};
+
+const S = {
+  key: LS.get("key", ""),
+  rating: LS.get("rating", 7),
+  kinds: LS.get("kinds", "all"),        // all | movie | tv
+  days: LS.get("days", 30),
+  minVotes: LS.get("minVotes", 20),
+  notify: LS.get("notify", false),
+  favs: LS.get("favs", []),             // [{kind,id,title,poster,date,seen}]
+  seen: LS.get("seen", {}),             // id -> время, когда новинку впервые показали
+  tab: "new",
+  soonKind: "movie",
+};
+const save = (...keys) => keys.forEach(k => LS.set(k, S[k]));
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const iso = d => d.toISOString().slice(0, 10);
+const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return d; };
+const fmtDate = s => s ? new Date(s + "T00:00:00").toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" }) : "дата неизвестна";
+
+function toast(msg, ms = 2500) {
+  const t = $("#toast"); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), ms);
+}
+
+// ---------- TMDB ----------
+async function tmdb(path, params = {}) {
+  if (!S.key) throw new Error("NO_KEY");
+  const u = new URL(API + path);
+  const headers = {};
+  if (S.key.startsWith("eyJ")) headers.Authorization = "Bearer " + S.key; else u.searchParams.set("api_key", S.key);
+  u.searchParams.set("language", "ru-RU");
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, v);
+  const r = await fetch(u, { headers });
+  if (r.status === 401) throw new Error("BAD_KEY");
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+const norm = (x, kind) => ({
+  kind: kind || x.media_type,
+  id: x.id,
+  title: x.title || x.name,
+  date: x.release_date || x.first_air_date || "",
+  vote: x.vote_average || 0,
+  votes: x.vote_count || 0,
+  poster: x.poster_path,
+  backdrop: x.backdrop_path,
+  overview: x.overview,
+});
+
+async function discover(kind, from, to, withRating, pages = 2) {
+  const dateField = kind === "movie" ? "primary_release_date" : "first_air_date";
+  const base = {
+    [dateField + ".gte"]: from, [dateField + ".lte"]: to,
+    sort_by: "popularity.desc", include_adult: "false",
+  };
+  if (withRating) { base["vote_average.gte"] = S.rating; base["vote_count.gte"] = S.minVotes; }
+  const out = [];
+  for (let p = 1; p <= pages; p++) {
+    const d = await tmdb("/discover/" + kind, { ...base, page: p });
+    out.push(...d.results.map(x => norm(x, kind)));
+    if (p >= d.total_pages) break;
+  }
+  return out;
+}
+
+async function freshReleases() {
+  const from = iso(addDays(-S.days)), to = iso(new Date());
+  const kinds = S.kinds === "all" ? ["movie", "tv"] : [S.kinds];
+  const lists = await Promise.all(kinds.map(k => discover(k, from, to, true)));
+  return lists.flat().sort((a, b) => b.vote - a.vote);
+}
+
+// ---------- карточки ----------
+function card(it, opts = {}) {
+  const img = it.poster ? `<img loading="lazy" src="${IMG}w342${it.poster}" alt="">` : `<div class="noimg">${it.kind === "tv" ? "📺" : "🎬"}</div>`;
+  const rate = it.vote ? `<div class="rate ${it.vote >= S.rating ? "hi" : ""}">★ ${it.vote.toFixed(1)}</div>` : "";
+  const badge = opts.isNew ? `<div class="new">NEW</div>` : `<div class="kind">${it.kind === "tv" ? "📺" : "🎬"}</div>`;
+  return `<div class="card" data-kind="${it.kind}" data-id="${it.id}">${img}${rate}${badge}
+    <div class="meta"><div class="t">${esc(it.title)}</div><div class="d">${opts.sub ?? fmtDate(it.date)}</div></div></div>`;
+}
+function grid(items, opts) { return `<div class="grid">${items.map(i => card(i, typeof opts === "function" ? opts(i) : opts)).join("")}</div>`; }
+const spinner = () => `<div class="spin">Загрузка…</div>`;
+
+function errorView(e) {
+  if (e.message === "NO_KEY") return `<div class="empty"><b>Нужен ключ TMDB</b><br><br>Откройте «Настройки» и вставьте бесплатный ключ API с themoviedb.org.<br><br><button class="btn" onclick="go('settings')">Открыть настройки</button></div>`;
+  if (e.message === "BAD_KEY") return `<div class="empty"><b>Ключ TMDB не подошёл</b><br><br>Проверьте его в «Настройках».</div>`;
+  return `<div class="empty"><b>Не удалось загрузить данные</b><br><br>${esc(e.message)}<br>Проверьте интернет. Если TMDB не открывается у вашего провайдера, может понадобиться VPN.</div>`;
+}
+
+// ---------- экраны ----------
+const views = {
+  async new(v) {
+    $("#title").textContent = "Новинки";
+    $("#sub").textContent = `Вышли за ${S.days} дн. · оценка от ${S.rating}`;
+    v.innerHTML = installHint() + spinner();
+    const items = await freshReleases();
+    const now = Date.now();
+    const freshIds = new Set();
+    for (const it of items) {
+      const k = it.kind + it.id;
+      if (!S.seen[k]) { S.seen[k] = now; freshIds.add(k); }
+      else if (now - S.seen[k] < 24 * 3600e3) freshIds.add(k);  // отмечаем как NEW сутки
+    }
+    save("seen");
+    setBadge(0);
+    v.innerHTML = installHint() + (items.length
+      ? grid(items, i => ({ isNew: freshIds.has(i.kind + i.id) }))
+      : `<div class="empty">За последние ${S.days} дней нет новинок с оценкой от <b>${S.rating}</b>.<br><br>Попробуйте понизить порог в настройках.</div>`);
+  },
+
+  async soon(v) {
+    $("#title").textContent = "Скоро выйдет";
+    $("#sub").textContent = "Ближайшие 2 месяца · добавьте в избранное, чтобы получить напоминание";
+    const seg = `<div class="seg"><button data-sk="movie" class="${S.soonKind === "movie" ? "on" : ""}">🎬 Фильмы</button><button data-sk="tv" class="${S.soonKind === "tv" ? "on" : ""}">📺 Сериалы</button></div>`;
+    v.innerHTML = seg + spinner();
+    const items = await discover(S.soonKind, iso(addDays(1)), iso(addDays(60)), false, 2);
+    items.sort((a, b) => a.date.localeCompare(b.date));
+    v.innerHTML = seg + (items.length ? grid(items, {}) : `<div class="empty">Ничего не найдено.</div>`);
+    v.querySelectorAll("[data-sk]").forEach(b => b.onclick = () => { S.soonKind = b.dataset.sk; render(); });
+  },
+
+  async search(v) {
+    $("#title").textContent = "Поиск";
+    $("#sub").textContent = "Фильмы и сериалы";
+    v.innerHTML = `<input type="search" id="q" placeholder="Название фильма или сериала" autocomplete="off"><div id="res" style="margin-top:12px"></div>`;
+    const q = $("#q"), res = $("#res");
+    q.value = S.lastQuery || "";
+    let t;
+    const run = async () => {
+      const text = q.value.trim(); S.lastQuery = text;
+      if (text.length < 2) { res.innerHTML = `<div class="empty">Начните вводить название.</div>`; return; }
+      res.innerHTML = spinner();
+      try {
+        const d = await tmdb("/search/multi", { query: text, include_adult: "false" });
+        const items = d.results.filter(x => x.media_type === "movie" || x.media_type === "tv").map(x => norm(x));
+        res.innerHTML = items.length ? grid(items, {}) : `<div class="empty">Ничего не нашлось.</div>`;
+      } catch (e) { res.innerHTML = errorView(e); }
+    };
+    q.oninput = () => { clearTimeout(t); t = setTimeout(run, 350); };
+    run();
+  },
+
+  async fav(v) {
+    $("#title").textContent = "Избранное";
+    $("#sub").textContent = "Напомню, когда выйдет фильм или новая серия";
+    if (!S.favs.length) {
+      v.innerHTML = `<div class="empty">Здесь пока пусто.<br><br>Откройте любой фильм или сериал и нажмите <b>«Напомнить о выходе»</b>.</div>`;
+      return;
+    }
+    const today = iso(new Date());
+    const upcoming = S.favs.filter(f => f.date && f.date > today).sort((a, b) => a.date.localeCompare(b.date));
+    const released = S.favs.filter(f => !(f.date && f.date > today));
+    const sub = f => f.next ? `Следующая серия: ${fmtDate(f.next)}` : (f.date > today ? `Выйдет ${fmtDate(f.date)}` : fmtDate(f.date));
+    v.innerHTML =
+      (upcoming.length ? `<div class="section-h">Ждём</div>` + grid(upcoming, f => ({ sub: sub(f) })) : "") +
+      (released.length ? `<div class="section-h">Уже вышло</div>` + grid(released, f => ({ sub: sub(f) })) : "");
+  },
+
+  async settings(v) {
+    $("#title").textContent = "Настройки";
+    $("#sub").textContent = "";
+    const perm = "Notification" in window ? Notification.permission : "unsupported";
+    v.innerHTML = `
+      <div class="field">
+        <label>Минимальная оценка</label>
+        <div class="big" id="rv">${S.rating.toFixed(1)}</div>
+        <input type="range" id="rating" min="5" max="9.5" step="0.1" value="${S.rating}">
+        <div class="hint">Показываю и напоминаю только о новинках с оценкой TMDB не ниже этой.</div>
+      </div>
+      <div class="field">
+        <label>Что показывать</label>
+        <div class="seg" id="kinds">
+          <button data-k="all">Всё</button><button data-k="movie">🎬 Фильмы</button><button data-k="tv">📺 Сериалы</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Новинки за последние</label>
+        <select id="days">${[7, 14, 30, 60, 90].map(d => `<option value="${d}" ${d === S.days ? "selected" : ""}>${d} дней</option>`).join("")}</select>
+      </div>
+      <div class="field">
+        <label>Минимум голосов</label>
+        <select id="minVotes">${[5, 20, 50, 100, 300].map(d => `<option value="${d}" ${d === S.minVotes ? "selected" : ""}>${d}</option>`).join("")}</select>
+        <div class="hint">У свежих релизов мало оценок. Этот фильтр отсекает случайные «10 из 10» от пары зрителей.</div>
+      </div>
+      <div class="field">
+        <label>Уведомления</label>
+        <button class="btn ${S.notify && perm === "granted" ? "ghost" : ""}" id="notif">${S.notify && perm === "granted" ? "Включены ✓" : "Включить уведомления"}</button>
+        <div class="hint">Приложение проверяет новинки при каждом открытии и раз в 30 минут, пока оно открыто. ${perm === "unsupported" ? "<br><b>На этом устройстве уведомления недоступны.</b> На iPhone сначала добавьте приложение на экран «Домой»." : ""}</div>
+      </div>
+      <div class="field">
+        <label>Ключ TMDB API</label>
+        <input type="text" id="key" placeholder="Вставьте ключ" value="${esc(S.key)}" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <div class="hint">Бесплатно: зарегистрируйтесь на <a href="https://www.themoviedb.org/signup" target="_blank" rel="noopener">themoviedb.org</a>, затем <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Настройки → API</a>. Подходит «API Key» или «API Read Access Token». Ключ хранится только на этом устройстве.</div>
+        <div class="row" style="margin-top:10px"><button class="btn" id="saveKey">Сохранить ключ</button></div>
+      </div>
+      <div class="hint" style="color:var(--muted);font-size:12px;text-align:center;margin:20px 0">Данные о фильмах: TMDB. Этот продукт использует API TMDB, но не одобрен и не сертифицирован TMDB.</div>`;
+
+    const r = $("#rating");
+    r.oninput = () => { $("#rv").textContent = (+r.value).toFixed(1); };
+    r.onchange = () => { S.rating = +r.value; save("rating"); toast(`Порог: ${S.rating.toFixed(1)}`); };
+    const kb = v.querySelectorAll("[data-k]");
+    const mark = () => kb.forEach(b => b.classList.toggle("on", b.dataset.k === S.kinds));
+    mark();
+    kb.forEach(b => b.onclick = () => { S.kinds = b.dataset.k; save("kinds"); mark(); });
+    $("#days").onchange = e => { S.days = +e.target.value; save("days"); };
+    $("#minVotes").onchange = e => { S.minVotes = +e.target.value; save("minVotes"); };
+    $("#saveKey").onclick = async () => {
+      S.key = $("#key").value.trim(); save("key");
+      try { await tmdb("/configuration"); toast("Ключ работает ✓"); } catch (e) { toast(e.message === "BAD_KEY" ? "Ключ не подошёл" : "Не удалось проверить ключ: " + e.message, 4000); }
+    };
+    $("#notif").onclick = async () => {
+      if (!("Notification" in window)) { toast("Уведомления не поддерживаются на этом устройстве"); return; }
+      const p = await Notification.requestPermission();
+      S.notify = p === "granted"; save("notify");
+      toast(S.notify ? "Уведомления включены" : "Уведомления запрещены в настройках браузера");
+      render();
+    };
+  },
+};
+
+function installHint() {
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  if (standalone || LS.get("hideInstall", false)) return "";
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  return `<div class="install">📲 <b>Установите как приложение:</b> ${ios ? "в Safari нажмите «Поделиться» → «На экран „Домой“»" : "в меню браузера выберите «Установить приложение» или «Добавить на главный экран»"}.
+    <a href="#" style="color:var(--muted);float:right" onclick="localStorage.setItem('pr_hideInstall','true');this.parentNode.remove();return false">скрыть</a></div>`;
+}
+
+// ---------- карточка фильма ----------
+async function openDetails(kind, id) {
+  const sheet = $("#sheet"), body = $("#sheet-body");
+  sheet.hidden = false; body.innerHTML = spinner();
+  try {
+    const d = await tmdb(`/${kind}/${id}`, { append_to_response: "videos", include_video_language: "ru,en" });
+    const it = norm(d, kind);
+    const trailer = (d.videos?.results || []).find(x => x.site === "YouTube" && x.type === "Trailer");
+    const isFav = S.favs.some(f => f.kind === kind && f.id === id);
+    const next = d.next_episode_to_air?.air_date;
+    const facts = [
+      kind === "tv" ? "Сериал" : "Фильм",
+      fmtDate(it.date),
+      d.runtime ? `${d.runtime} мин` : "",
+      kind === "tv" && d.number_of_seasons ? `${d.number_of_seasons} сез.` : "",
+    ].filter(Boolean).join(" · ");
+    body.innerHTML = `
+      <button class="close" onclick="closeSheet()">✕</button>
+      ${it.backdrop ? `<img class="hero" src="${IMG}w780${it.backdrop}" alt="">` : ""}
+      <div class="inner">
+        <h2>${esc(it.title)}</h2>
+        <div class="facts">${facts}</div>
+        ${it.vote ? `<div><b style="color:${it.vote >= S.rating ? "var(--good)" : "var(--text)"}">★ ${it.vote.toFixed(1)}</b> <span style="color:var(--muted)">(${it.votes} голосов)</span></div>` : `<div style="color:var(--muted)">Оценок пока нет</div>`}
+        ${next ? `<div style="margin-top:6px">📅 Следующая серия: <b>${fmtDate(next)}</b></div>` : ""}
+        <div class="chips">${(d.genres || []).map(g => `<span class="chip">${esc(g.name)}</span>`).join("")}</div>
+        <div class="actions">
+          <button class="btn ${isFav ? "ghost" : ""}" id="favBtn">${isFav ? "✓ В избранном" : "🔔 Напомнить о выходе"}</button>
+          ${trailer ? `<a class="btn ghost" href="https://www.youtube.com/watch?v=${trailer.key}" target="_blank" rel="noopener">▶ Трейлер</a>` : ""}
+        </div>
+        <p>${esc(it.overview) || "<span style='color:var(--muted)'>Описания пока нет.</span>"}</p>
+        <a href="https://www.themoviedb.org/${kind}/${id}" target="_blank" rel="noopener" style="color:var(--muted);font-size:13px">Открыть на TMDB</a>
+      </div>`;
+    $("#favBtn").onclick = () => {
+      const i = S.favs.findIndex(f => f.kind === kind && f.id === id);
+      if (i >= 0) { S.favs.splice(i, 1); toast("Удалено из избранного"); }
+      else {
+        S.favs.push({ kind, id, title: it.title, poster: it.poster, date: it.date, vote: it.vote, next, lastEp: d.last_episode_to_air?.air_date || "", notified: it.date && it.date <= iso(new Date()) });
+        toast(kind === "tv" ? "Напомню о новых сериях" : "Напомню, когда выйдет");
+      }
+      save("favs"); openDetails(kind, id); if (S.tab === "fav") render();
+    };
+  } catch (e) { body.innerHTML = `<button class="close" onclick="closeSheet()">✕</button>` + errorView(e); }
+}
+function closeSheet() { $("#sheet").hidden = true; }
+
+// ---------- проверка новинок и уведомления ----------
+function setBadge(n) { const b = $("#badge"); b.hidden = !n; b.textContent = n; }
+
+async function notify(title, body, tag) {
+  if (!S.notify || !("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (reg) reg.showNotification(title, { body, tag, icon: "icons/icon-192.png", badge: "icons/icon-192.png" });
+    else new Notification(title, { body, tag, icon: "icons/icon-192.png" });
+  } catch {}
+}
+
+async function backgroundCheck() {
+  if (!S.key) return;
+  const today = iso(new Date());
+  // 1) новинки выше порога, которых пользователь ещё не видел
+  try {
+    const items = await freshReleases();
+    const unseen = items.filter(it => !S.seen[it.kind + it.id]);
+    if (S.tab !== "new") setBadge(unseen.length);
+    if (unseen.length) {
+      const top = unseen.slice(0, 3).map(i => `${i.title} ★${i.vote.toFixed(1)}`).join(", ");
+      notify(`Новинок с оценкой от ${S.rating}: ${unseen.length}`, top, "fresh");
+    }
+  } catch {}
+  // 2) избранное: вышел фильм или новая серия
+  let changed = false;
+  for (const f of S.favs) {
+    try {
+      if (f.kind === "movie" && !f.notified && f.date && f.date <= today) {
+        notify("Вышел фильм из избранного", f.title, "fav" + f.id); f.notified = true; changed = true;
+      }
+      if (f.kind === "tv") {
+        const d = await tmdb(`/tv/${f.id}`);
+        const last = d.last_episode_to_air?.air_date || "";
+        if (last && last > (f.lastEp || "") && last <= today) {
+          const ep = d.last_episode_to_air;
+          notify(`Новая серия: ${f.title}`, `Сезон ${ep.season_number}, серия ${ep.episode_number}`, "tv" + f.id);
+          f.lastEp = last; changed = true;
+        }
+        const nxt = d.next_episode_to_air?.air_date || null;
+        if (nxt !== f.next) { f.next = nxt; changed = true; }
+      }
+    } catch {}
+  }
+  if (changed) save("favs");
+}
+
+// ---------- навигация ----------
+async function render() {
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === S.tab));
+  const v = $("#view");
+  window.scrollTo(0, 0);
+  try { await views[S.tab](v); } catch (e) { v.innerHTML = errorView(e); }
+}
+function go(tab) { S.tab = tab; render(); }
+window.go = go; window.closeSheet = closeSheet;
+
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => go(b.dataset.tab));
+$("#view").addEventListener("click", e => {
+  const c = e.target.closest(".card"); if (c) openDetails(c.dataset.kind, +c.dataset.id);
+});
+$(".sheet-bg").onclick = closeSheet;
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+if (!S.key) S.tab = "settings";
+render();
+backgroundCheck();
+setInterval(backgroundCheck, 30 * 60e3);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") backgroundCheck(); });
