@@ -28,8 +28,9 @@ const GENRES = [
   { k: "adventure", n: "Приключения", m: [12], t: [10759] },
   { k: "comedy", n: "Комедия", m: [35], t: [35] },
   { k: "drama", n: "Драма", m: [18], t: [18] },
-  { k: "thriller", n: "Триллер", m: [53], t: [9648, 80] },
-  { k: "horror", n: "Ужасы", m: [27], t: [] },
+  // У сериалов в TMDB нет жанров «Триллер» и «Ужасы», поэтому сериалы ищем по ключевым словам (kw).
+  { k: "thriller", n: "Триллер", m: [53], t: [], kw: ["thriller", "psychological thriller", "crime thriller", "political thriller", "conspiracy thriller", "suspense"] },
+  { k: "horror", n: "Ужасы", m: [27], t: [], kw: ["horror", "supernatural horror", "psychological horror", "folk horror", "body horror", "slasher", "survival horror"] },
   { k: "scifi", n: "Фантастика", m: [878], t: [10765] },
   { k: "fantasy", n: "Фэнтези", m: [14], t: [10765] },
   { k: "crime", n: "Криминал", m: [80], t: [80] },
@@ -42,11 +43,33 @@ const GENRES = [
   { k: "documentary", n: "Документальный", m: [99], t: [99] },
   { k: "western", n: "Вестерн", m: [37], t: [37] },
 ];
-// Возвращает строку для with_genres ("28|12"), "" если фильтра нет, или null если для этого типа ничего не подходит.
-function genreParam(kind) {
-  if (!S.genres.length) return "";
-  const ids = new Set(GENRES.filter(g => S.genres.includes(g.k)).flatMap(g => kind === "movie" ? g.m : g.t));
-  return ids.size ? [...ids].join("|") : null;
+// Набор запросов к /discover для выбранных жанров: по жанрам и (для сериалов) по ключевым словам.
+async function genreQueries(kind) {
+  if (!S.genres.length) return [{}];
+  const sel = GENRES.filter(g => S.genres.includes(g.k));
+  const qs = [];
+  const ids = new Set(sel.flatMap(g => kind === "movie" ? g.m : g.t));
+  if (ids.size) qs.push({ with_genres: [...ids].join("|") });
+  if (kind === "tv") {
+    const kw = await keywordIds(sel.flatMap(g => g.kw || []));
+    if (kw.length) qs.push({ with_keywords: kw.join("|") });
+  }
+  return qs;
+}
+// id ключевых слов TMDB по их названиям (кэшируются на устройстве).
+async function keywordIds(names) {
+  const cache = LS.get("kwcache", {});
+  let changed = false;
+  for (const n of names) {
+    if (cache[n]) continue;
+    try {
+      const d = await tmdb("/search/keyword", { query: n });
+      cache[n] = (d.results || []).filter(r => (r.name || "").toLowerCase() === n).map(r => r.id);
+      changed = true;
+    } catch (e) { if (e.message === "NO_KEY" || e.message === "BAD_KEY") throw e; }
+  }
+  if (changed) LS.set("kwcache", cache);
+  return [...new Set(names.flatMap(n => cache[n] || []))];
 }
 const genreNames = () => GENRES.filter(g => S.genres.includes(g.k)).map(g => g.n.toLowerCase()).join(", ");
 const save = (...keys) => keys.forEach(k => LS.set(k, S[k]));
@@ -101,15 +124,15 @@ async function discover(kind, from, to, withRating, pages = 3) {
     [dateField + ".gte"]: from, [dateField + ".lte"]: to,
     sort_by: "popularity.desc", include_adult: "false",
   };
-  const gp = genreParam(kind);
-  if (gp === null) return [];
-  if (gp) base.with_genres = gp;
   if (withRating) { base["vote_average.gte"] = S.rating; base["vote_count.gte"] = S.minVotes; }
-  const out = [];
-  for (let p = 1; p <= pages; p++) {
-    const d = await tmdb("/discover/" + kind, { ...base, page: p });
-    out.push(...d.results.map(x => norm(x, kind)).filter(allowed));
-    if (p >= d.total_pages) break;
+  const out = [], seen = new Set();
+  for (const q of await genreQueries(kind)) {
+    for (let p = 1; p <= pages; p++) {
+      const d = await tmdb("/discover/" + kind, { ...base, ...q, page: p });
+      for (const it of d.results.map(x => norm(x, kind)).filter(allowed))
+        if (!seen.has(it.id)) { seen.add(it.id); out.push(it); }
+      if (p >= d.total_pages) break;
+    }
   }
   return out;
 }
