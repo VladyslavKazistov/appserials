@@ -220,7 +220,7 @@ function errorView(e) {
 }
 
 // ---------- фильтр по датам ----------
-function periodBar() {
+function periodBar(withKinds = true) {
   const p = S.period, now = new Date();
   const [cy, cm] = (p.ym || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`).split("-");
   const years = []; for (let y = now.getFullYear() + 1; y >= 1990; y--) years.push(y);
@@ -233,21 +233,34 @@ function periodBar() {
   if (p.mode === "range") extra = `<div class="row" style="margin-bottom:12px">
       <input type="date" id="pmFrom" value="${p.from || iso(addDays(-30))}"><span style="color:var(--muted)">–</span><input type="date" id="pmTo" value="${p.to || iso(new Date())}"></div>`;
   return `<div class="seg">${btn("recent", `Последние ${S.days} дн.`)}${btn("month", "📅 Месяц")}${btn("range", "Период")}</div>${extra}
-    <div class="seg">${kbtn("all", "Всё")}${kbtn("movie", "🎬 Фильмы")}${kbtn("tv", "📺 Сериалы")}</div>`;
+    ${withKinds ? `<div class="seg">${kbtn("all", "Всё")}${kbtn("movie", "🎬 Фильмы")}${kbtn("tv", "📺 Сериалы")}</div>` : ""}`;
 }
-function bindPeriodBar(v) {
-  const setP = np => { S.period = np; save("period"); render(); };
-  v.querySelectorAll("[data-pm]").forEach(b => b.onclick = () => {
-    const m = b.dataset.pm, now = new Date();
-    if (m === "month") setP({ mode: "month", ym: S.period.ym || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}` });
-    else if (m === "range") setP({ mode: "range", from: S.period.from || iso(addDays(-30)), to: S.period.to || iso(now) });
-    else setP({ mode: "recent" });
-  });
-  v.querySelectorAll("[data-kk]").forEach(b => b.onclick = () => { S.kinds = b.dataset.kk; save("kinds"); render(); });
-  const mo = v.querySelector("#pmMonth"), yr = v.querySelector("#pmYear");
-  if (mo && yr) mo.onchange = yr.onchange = () => setP({ ...S.period, mode: "month", ym: `${yr.value}-${mo.value}` });
-  const f = v.querySelector("#pmFrom"), t = v.querySelector("#pmTo");
-  if (f && t) f.onchange = t.onchange = () => { if (f.value && t.value) setP({ ...S.period, mode: "range", from: f.value, to: t.value }); };
+// Обработчики фильтра периода повешены на весь экран один раз (делегирование),
+// поэтому продолжают работать после любой перерисовки.
+function setPeriod(np) { S.period = np; save("period"); render(S.tab === "settings"); }
+function onPeriodClick(e) {
+  const pm = e.target.closest("[data-pm]");
+  if (pm) {
+    const m = pm.dataset.pm, now = new Date();
+    if (m === "month") setPeriod({ ...S.period, mode: "month", ym: S.period.ym || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}` });
+    else if (m === "range") setPeriod({ ...S.period, mode: "range", from: S.period.from || iso(addDays(-30)), to: S.period.to || iso(now) });
+    else setPeriod({ ...S.period, mode: "recent" });
+    return true;
+  }
+  const kk = e.target.closest("[data-kk]");
+  if (kk) { S.kinds = kk.dataset.kk; save("kinds"); render(); return true; }
+  const sk = e.target.closest("[data-sk]");
+  if (sk) { S.soonKind = sk.dataset.sk; render(); return true; }
+  return false;
+}
+function onPeriodChange(e) {
+  const id = e.target.id;
+  if (id === "pmMonth" || id === "pmYear") {
+    setPeriod({ ...S.period, mode: "month", ym: `${$("#pmYear").value}-${$("#pmMonth").value}` });
+  } else if (id === "pmFrom" || id === "pmTo") {
+    const f = $("#pmFrom").value, t = $("#pmTo").value;
+    if (f && t) setPeriod({ ...S.period, mode: "range", from: f, to: t });
+  }
 }
 
 // ---------- экраны ----------
@@ -257,8 +270,9 @@ const views = {
     $("#sub").textContent = `Вышли ${periodLabel()} · оценка от ${S.rating}` + (S.genres.length ? ` · ${genreNames()}` : "");
     const bar = periodBar();
     v.innerHTML = installHint() + bar + spinner();
-    bindPeriodBar(v);
+    const seq = S.seq;
     const items = await freshReleases(periodRange());
+    if (isStale(seq)) return;
     const now = Date.now();
     const freshIds = new Set();
     for (const it of items) {
@@ -271,7 +285,6 @@ const views = {
     v.innerHTML = installHint() + bar + (items.length
       ? grid(items, i => ({ isNew: S.period.mode === "recent" && freshIds.has(itemKey(i)) }))
       : `<div class="empty">Не нашлось ничего, что вышло ${periodLabel()}, с оценкой от <b>${S.rating}</b>${S.genres.length ? ` в жанрах: ${genreNames()}` : ""}.<br><br>Попробуйте понизить порог или выбрать другие жанры в настройках.</div>`);
-    bindPeriodBar(v); // кнопки создаются заново, поэтому подключаем обработчики после отрисовки
   },
 
   async soon(v) {
@@ -279,10 +292,11 @@ const views = {
     $("#sub").textContent = "Ближайшие 2 месяца" + (S.genres.length ? ` · ${genreNames()}` : " · добавьте в избранное, чтобы получить напоминание");
     const seg = `<div class="seg"><button data-sk="movie" class="${S.soonKind === "movie" ? "on" : ""}">🎬 Фильмы</button><button data-sk="tv" class="${S.soonKind === "tv" ? "on" : ""}">📺 Сериалы</button></div>`;
     v.innerHTML = seg + spinner();
+    const seq = S.seq;
     const items = await discover(S.soonKind, iso(addDays(1)), iso(addDays(60)), false, 3);
+    if (isStale(seq)) return;
     items.sort((a, b) => a.date.localeCompare(b.date));
     v.innerHTML = seg + (items.length ? grid(items, {}) : `<div class="empty">Ничего не найдено.</div>`);
-    v.querySelectorAll("[data-sk]").forEach(b => b.onclick = () => { S.soonKind = b.dataset.sk; render(); });
   },
 
   async search(v) {
@@ -343,6 +357,11 @@ const views = {
         <label>Жанры</label>
         <div class="chips" id="genres" style="display:flex;flex-wrap:wrap;gap:6px">${GENRES.map(g => `<button class="gchip" data-g="${g.k}">${g.n}</button>`).join("")}</div>
         <div class="hint">Отметьте жанры, которые вам интересны. Если ничего не отмечено, показываю все жанры. <a href="#" id="gclear">Сбросить</a></div>
+      </div>
+      <div class="field">
+        <label>Период для «Новинок»</label>
+        ${periodBar(false)}
+        <div class="hint">«Последние дни» — свежие релизы (их длина задаётся ниже). «Месяц» — всё, что вышло в выбранном месяце. «Период» — свои даты «с» и «по», например с 1 января по 1 февраля.</div>
       </div>
       <div class="field">
         <label>Новинки за последние</label>
@@ -521,17 +540,22 @@ async function backgroundCheck() {
 }
 
 // ---------- навигация ----------
-async function render() {
+let renderSeq = 0;
+const isStale = seq => seq !== renderSeq; // пользователь уже переключил фильтр, старый результат не рисуем
+async function render(keepScroll = false) {
+  const seq = ++renderSeq; S.seq = seq;
   document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === S.tab));
   const v = $("#view");
-  window.scrollTo(0, 0);
-  try { await views[S.tab](v); } catch (e) { v.innerHTML = errorView(e); }
+  if (!keepScroll) window.scrollTo(0, 0);
+  try { await views[S.tab](v); } catch (e) { if (!isStale(seq)) v.innerHTML = errorView(e); }
 }
 function go(tab) { S.tab = tab; render(); }
 window.go = go; window.closeSheet = closeSheet;
 
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => go(b.dataset.tab));
+$("#view").addEventListener("change", onPeriodChange);
 $("#view").addEventListener("click", e => {
+  if (onPeriodClick(e)) return;
   const c = e.target.closest(".card"); if (c) openDetails(c.dataset.kind, +c.dataset.id);
 });
 $(".sheet-bg").onclick = closeSheet;
