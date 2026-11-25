@@ -15,7 +15,6 @@ const S = {
   days: LS.get("days", 30),
   minVotes: LS.get("minVotes", 20),
   notify: LS.get("notify", false),
-  hideRuAsia: LS.get("hideRuAsia", true), // скрывать российские, турецкие и азиатские фильмы/сериалы
   genres: LS.get("genres", []),
   period: LS.get("period", { mode: "recent" }), // recent | month (ym: "2026-01") | range (from, to)          // ключи из GENRES; пусто = все жанры
   favs: LS.get("favs", []),             // [{kind,id,title,poster,date,seen}]
@@ -117,7 +116,8 @@ const norm = (x, kind) => ({
 // Российские, турецкие и азиатские: по языку оригинала и стране производства.
 const EXCL_LANGS = new Set(["ru", "tr", "ja", "ko", "zh", "cn", "th", "hi", "ta", "te", "ml", "kn", "bn", "mr", "pa", "gu", "ur", "id", "ms", "vi", "tl", "km", "lo", "my", "mn", "ne", "si", "kk", "uz", "ky", "tg"]);
 const EXCL_COUNTRIES = new Set(["RU", "TR", "JP", "KR", "KP", "CN", "TW", "HK", "MO", "TH", "IN", "ID", "MY", "PH", "VN", "SG", "KH", "LA", "MM", "MN", "NP", "BD", "LK", "PK", "KZ", "UZ", "KG", "TJ", "TM", "BT", "BN", "TL", "MV", "AF"]);
-const allowed = it => !S.hideRuAsia || !(EXCL_LANGS.has(it.lang) || it.countries.some(c => EXCL_COUNTRIES.has(c)));
+// Российские, турецкие и азиатские фильмы и сериалы не показываются нигде.
+const allowed = it => !(EXCL_LANGS.has(it.lang) || it.countries.some(c => EXCL_COUNTRIES.has(c)));
 
 async function discover(kind, from, to, withRating, pages = 3) {
   const dateField = kind === "movie" ? "primary_release_date" : "first_air_date";
@@ -298,7 +298,7 @@ const views = {
       res.innerHTML = spinner();
       try {
         const d = await tmdb("/search/multi", { query: text, include_adult: "false" });
-        const items = d.results.filter(x => x.media_type === "movie" || x.media_type === "tv").map(x => norm(x));
+        const items = d.results.filter(x => x.media_type === "movie" || x.media_type === "tv").map(x => norm(x)).filter(allowed);
         res.innerHTML = items.length ? grid(items, {}) : `<div class="empty">Ничего не нашлось.</div>`;
       } catch (e) { res.innerHTML = errorView(e); }
     };
@@ -345,10 +345,6 @@ const views = {
         <div class="hint">Отметьте жанры, которые вам интересны. Если ничего не отмечено, показываю все жанры. <a href="#" id="gclear">Сбросить</a></div>
       </div>
       <div class="field">
-        <label style="display:flex;align-items:center;gap:10px;justify-content:space-between;margin:0"><span>Скрывать российские, турецкие и азиатские</span><input type="checkbox" id="hideRuAsia" ${S.hideRuAsia ? "checked" : ""} style="width:22px;height:22px;accent-color:var(--acc)"></label>
-        <div class="hint">Фильмы и сериалы из России, Турции, Японии, Кореи, Китая, Индии, Таиланда и других стран Азии не показываются в «Новинках» и «Скоро». В поиске они остаются.</div>
-      </div>
-      <div class="field">
         <label>Новинки за последние</label>
         <select id="days">${[7, 14, 30, 60, 90].map(d => `<option value="${d}" ${d === S.days ? "selected" : ""}>${d} дней</option>`).join("")}</select>
       </div>
@@ -386,7 +382,6 @@ const views = {
       save("genres"); gmark();
     });
     $("#gclear").onclick = e => { e.preventDefault(); S.genres = []; save("genres"); gmark(); toast("Показываю все жанры"); };
-    $("#hideRuAsia").onchange = e => { S.hideRuAsia = e.target.checked; save("hideRuAsia"); toast(S.hideRuAsia ? "Российские, турецкие и азиатские скрыты" : "Показываю всё"); };
     $("#days").onchange = e => { S.days = +e.target.value; save("days"); };
     $("#minVotes").onchange = e => { S.minVotes = +e.target.value; save("minVotes"); };
     $("#saveKey").onclick = async () => {
