@@ -135,8 +135,45 @@ async function discover(kind, from, to, withRating, pages = 3) {
       if (p >= d.total_pages) break;
     }
   }
+  if (kind === "tv") out.push(...await newSeasons(from, to, withRating, seen));
   return out;
 }
+
+// Новые сезоны (2-й и дальше) уже идущих сериалов, премьера которых попала в период.
+const seasonCache = new Map(); // id сериала -> { t, seasons }
+async function showSeasons(id) {
+  const c = seasonCache.get(id);
+  if (c && Date.now() - c.t < 6 * 3600e3) return c.seasons;
+  const d = await tmdb(`/tv/${id}`);
+  const seasons = (d.seasons || []).filter(x => x.season_number >= 1).map(x => ({ n: x.season_number, date: x.air_date || "", poster: x.poster_path }));
+  seasonCache.set(id, { t: Date.now(), seasons });
+  return seasons;
+}
+async function newSeasons(from, to, withRating, skipIds) {
+  const base = { "air_date.gte": from, "air_date.lte": to, sort_by: "popularity.desc", include_adult: "false" };
+  if (withRating) { base["vote_average.gte"] = S.rating; base["vote_count.gte"] = S.minVotes; }
+  const cands = [], seen = new Set(skipIds);
+  for (const q of await genreQueries("tv")) {
+    for (let p = 1; p <= 2; p++) {
+      const d = await tmdb("/discover/tv", { ...base, ...q, page: p });
+      for (const it of d.results.map(x => norm(x, "tv")).filter(allowed))
+        if (!seen.has(it.id) && it.date && it.date < from) { seen.add(it.id); cands.push(it); }
+      if (p >= d.total_pages) break;
+    }
+  }
+  const out = [];
+  // Проверяем сериалы пачками по 8, чтобы не перегружать TMDB.
+  for (let i = 0; i < cands.length; i += 8) {
+    await Promise.all(cands.slice(i, i + 8).map(async it => {
+      try {
+        const ss = (await showSeasons(it.id)).filter(x => x.n >= 2 && x.date >= from && x.date <= to);
+        for (const sn of ss) out.push({ ...it, season: sn.n, date: sn.date, poster: sn.poster || it.poster });
+      } catch {}
+    }));
+  }
+  return out;
+}
+const itemKey = it => it.kind + it.id + (it.season ? "s" + it.season : "");
 
 const MONTHS_IN = ["январе", "феврале", "марте", "апреле", "мае", "июне", "июле", "августе", "сентябре", "октябре", "ноябре", "декабре"];
 const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
@@ -171,7 +208,7 @@ function card(it, opts = {}) {
   const rate = it.vote ? `<div class="rate ${it.vote >= S.rating ? "hi" : ""}">★ ${it.vote.toFixed(1)}</div>` : "";
   const badge = opts.isNew ? `<div class="new">NEW</div>` : `<div class="kind">${it.kind === "tv" ? "📺" : "🎬"}</div>`;
   return `<div class="card" data-kind="${it.kind}" data-id="${it.id}">${img}${rate}${badge}
-    <div class="meta"><div class="t">${esc(it.title)}</div><div class="d">${opts.sub ?? fmtDate(it.date)}</div></div></div>`;
+    <div class="meta"><div class="t">${esc(it.title)}</div>${it.season ? `<div class="season">Сезон ${it.season}</div>` : ""}<div class="d">${opts.sub ?? fmtDate(it.date)}</div></div></div>`;
 }
 function grid(items, opts) { return `<div class="grid">${items.map(i => card(i, typeof opts === "function" ? opts(i) : opts)).join("")}</div>`; }
 const spinner = () => `<div class="spin">Загрузка…</div>`;
@@ -225,14 +262,14 @@ const views = {
     const now = Date.now();
     const freshIds = new Set();
     for (const it of items) {
-      const k = it.kind + it.id;
+      const k = itemKey(it);
       if (!S.seen[k]) { S.seen[k] = now; freshIds.add(k); }
       else if (now - S.seen[k] < 24 * 3600e3) freshIds.add(k);  // отмечаем как NEW сутки
     }
     save("seen");
     setBadge(0);
     v.innerHTML = installHint() + bar + (items.length
-      ? grid(items, i => ({ isNew: S.period.mode === "recent" && freshIds.has(i.kind + i.id) }))
+      ? grid(items, i => ({ isNew: S.period.mode === "recent" && freshIds.has(itemKey(i)) }))
       : `<div class="empty">Не нашлось ничего, что вышло ${periodLabel()}, с оценкой от <b>${S.rating}</b>${S.genres.length ? ` в жанрах: ${genreNames()}` : ""}.<br><br>Попробуйте понизить порог или выбрать другие жанры в настройках.</div>`);
     bindPeriodBar(v); // кнопки создаются заново, поэтому подключаем обработчики после отрисовки
   },
@@ -458,10 +495,10 @@ async function backgroundCheck() {
   // 1) новинки выше порога, которых пользователь ещё не видел
   try {
     const items = await freshReleases();
-    const unseen = items.filter(it => !S.seen[it.kind + it.id]);
+    const unseen = items.filter(it => !S.seen[itemKey(it)]);
     if (S.tab !== "new") setBadge(unseen.length);
     if (unseen.length) {
-      const top = unseen.slice(0, 3).map(i => `${i.title} ★${i.vote.toFixed(1)}`).join(", ");
+      const top = unseen.slice(0, 3).map(i => `${i.title}${i.season ? ` (сезон ${i.season})` : ""} ★${i.vote.toFixed(1)}`).join(", ");
       notify(`Новинок с оценкой от ${S.rating}: ${unseen.length}`, top, "fresh");
     }
   } catch {}
