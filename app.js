@@ -16,6 +16,7 @@ const S = {
   minVotes: LS.get("minVotes", 20),
   notify: LS.get("notify", false),
   genres: LS.get("genres", []),
+  seasons: LS.get("seasons", "all"),     // all | new (только 1-й сезон) | cont (только 2-й сезон и далее)
   period: LS.get("period", { mode: "month" }), // month (ym: "2026-01", пусто = текущий месяц) | range (from, to)          // ключи из GENRES; пусто = все жанры
   favs: LS.get("favs", []),             // [{kind,id,title,poster,date,seen}]
   seen: LS.get("seen", {}),             // id -> время, когда новинку впервые показали
@@ -138,7 +139,10 @@ async function discover(kind, from, to, withRating, pages = 3) {
       if (p >= d.total_pages) break;
     }
   }
-  if (kind === "tv") out.push(...await newSeasons(from, to, withRating, seen));
+  if (kind === "tv") {
+    const conts = S.seasons === "new" ? [] : await newSeasons(from, to, withRating, seen);
+    return S.seasons === "cont" ? conts : out.concat(conts);
+  }
   return out;
 }
 
@@ -220,6 +224,11 @@ function errorView(e) {
 }
 
 // ---------- фильтр по датам ----------
+// Переключатель сезонов для сериалов.
+function seasonSeg() {
+  const b = (k, t) => `<button data-ss="${k}" class="${S.seasons === k ? "on" : ""}">${t}</button>`;
+  return `<div class="seg">${b("all", "Все сезоны")}${b("new", "🆕 Новые сериалы")}${b("cont", "Продолжения (2+ сезон)")}</div>`;
+}
 function periodBar(withKinds = true) {
   const p = S.period, now = new Date();
   const [cy, cm] = (p.ym || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`).split("-");
@@ -233,7 +242,7 @@ function periodBar(withKinds = true) {
   if (p.mode === "range") extra = `<div class="row" style="margin-bottom:12px">
       <input type="date" id="pmFrom" value="${p.from || iso(addDays(-30))}"><span style="color:var(--muted)">–</span><input type="date" id="pmTo" value="${p.to || iso(new Date())}"></div>`;
   return `<div class="seg">${btn("month", "📅 Месяц")}${btn("range", "Период")}</div>${extra}
-    ${withKinds ? `<div class="seg">${kbtn("all", "Всё")}${kbtn("movie", "🎬 Фильмы")}${kbtn("tv", "📺 Сериалы")}</div>` : ""}`;
+    ${withKinds ? `<div class="seg">${kbtn("all", "Всё")}${kbtn("movie", "🎬 Фильмы")}${kbtn("tv", "📺 Сериалы")}</div>` + (S.kinds !== "movie" ? seasonSeg() : "") : ""}`;
 }
 // Обработчики фильтра периода повешены на весь экран один раз (делегирование),
 // поэтому продолжают работать после любой перерисовки.
@@ -246,6 +255,8 @@ function onPeriodClick(e) {
     else if (m === "range") setPeriod({ ...S.period, mode: "range", from: S.period.from || iso(addDays(-30)), to: S.period.to || iso(now) });
     return true;
   }
+  const ss = e.target.closest("[data-ss]");
+  if (ss) { S.seasons = ss.dataset.ss; save("seasons"); render(S.tab === "settings"); return true; }
   const kk = e.target.closest("[data-kk]");
   if (kk) { S.kinds = kk.dataset.kk; save("kinds"); render(); return true; }
   const sk = e.target.closest("[data-sk]");
@@ -290,12 +301,13 @@ const views = {
     $("#title").textContent = "Скоро выйдет";
     $("#sub").textContent = "Ближайшие 2 месяца" + (S.genres.length ? ` · ${genreNames()}` : " · добавьте в избранное, чтобы получить напоминание");
     const seg = `<div class="seg"><button data-sk="movie" class="${S.soonKind === "movie" ? "on" : ""}">🎬 Фильмы</button><button data-sk="tv" class="${S.soonKind === "tv" ? "on" : ""}">📺 Сериалы</button></div>`;
-    v.innerHTML = seg + spinner();
+    const segAll = seg + (S.soonKind === "tv" ? seasonSeg() : "");
+    v.innerHTML = segAll + spinner();
     const seq = S.seq;
     const items = await discover(S.soonKind, iso(addDays(1)), iso(addDays(60)), false, 3);
     if (isStale(seq)) return;
     items.sort((a, b) => a.date.localeCompare(b.date));
-    v.innerHTML = seg + (items.length ? grid(items, {}) : `<div class="empty">Ничего не найдено.</div>`);
+    v.innerHTML = segAll + (items.length ? grid(items, {}) : `<div class="empty">Ничего не найдено.</div>`);
   },
 
   async search(v) {
@@ -356,6 +368,11 @@ const views = {
         <label>Жанры</label>
         <div class="chips" id="genres" style="display:flex;flex-wrap:wrap;gap:6px">${GENRES.map(g => `<button class="gchip" data-g="${g.k}">${g.n}</button>`).join("")}</div>
         <div class="hint">Отметьте жанры, которые вам интересны. Если ничего не отмечено, показываю все жанры. <a href="#" id="gclear">Сбросить</a></div>
+      </div>
+      <div class="field">
+        <label>Сезоны сериалов</label>
+        ${seasonSeg()}
+        <div class="hint">«Новые сериалы» — только премьеры (1-й сезон). «Продолжения» — только 2-й, 3-й и следующие сезоны уже идущих сериалов. На фильмы не влияет.</div>
       </div>
       <div class="field">
         <label>Период для «Новинок»</label>
