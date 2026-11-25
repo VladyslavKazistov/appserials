@@ -15,12 +15,40 @@ const S = {
   days: LS.get("days", 30),
   minVotes: LS.get("minVotes", 20),
   notify: LS.get("notify", false),
-  hideRuAsia: LS.get("hideRuAsia", true), // скрывать российские и азиатские фильмы/сериалы
+  hideRuAsia: LS.get("hideRuAsia", true), // скрывать российские, турецкие и азиатские фильмы/сериалы
+  genres: LS.get("genres", []),          // ключи из GENRES; пусто = все жанры
   favs: LS.get("favs", []),             // [{kind,id,title,poster,date,seen}]
   seen: LS.get("seen", {}),             // id -> время, когда новинку впервые показали
   tab: "new",
   soonKind: "movie",
 };
+// Жанры TMDB: у фильмов и сериалов разные id, поэтому храним оба набора.
+const GENRES = [
+  { k: "action", n: "Боевик", m: [28], t: [10759] },
+  { k: "adventure", n: "Приключения", m: [12], t: [10759] },
+  { k: "comedy", n: "Комедия", m: [35], t: [35] },
+  { k: "drama", n: "Драма", m: [18], t: [18] },
+  { k: "thriller", n: "Триллер", m: [53], t: [9648, 80] },
+  { k: "horror", n: "Ужасы", m: [27], t: [] },
+  { k: "scifi", n: "Фантастика", m: [878], t: [10765] },
+  { k: "fantasy", n: "Фэнтези", m: [14], t: [10765] },
+  { k: "crime", n: "Криминал", m: [80], t: [80] },
+  { k: "mystery", n: "Детектив", m: [9648], t: [9648] },
+  { k: "romance", n: "Мелодрама", m: [10749], t: [] },
+  { k: "animation", n: "Мультфильм", m: [16], t: [16] },
+  { k: "family", n: "Семейный", m: [10751], t: [10751] },
+  { k: "war", n: "Военный", m: [10752], t: [10768] },
+  { k: "history", n: "Исторический", m: [36], t: [] },
+  { k: "documentary", n: "Документальный", m: [99], t: [99] },
+  { k: "western", n: "Вестерн", m: [37], t: [37] },
+];
+// Возвращает строку для with_genres ("28|12"), "" если фильтра нет, или null если для этого типа ничего не подходит.
+function genreParam(kind) {
+  if (!S.genres.length) return "";
+  const ids = new Set(GENRES.filter(g => S.genres.includes(g.k)).flatMap(g => kind === "movie" ? g.m : g.t));
+  return ids.size ? [...ids].join("|") : null;
+}
+const genreNames = () => GENRES.filter(g => S.genres.includes(g.k)).map(g => g.n.toLowerCase()).join(", ");
 const save = (...keys) => keys.forEach(k => LS.set(k, S[k]));
 
 const $ = s => document.querySelector(s);
@@ -62,9 +90,9 @@ const norm = (x, kind) => ({
   countries: x.origin_country || [],
 });
 
-// Российские и азиатские: по языку оригинала и стране производства.
-const EXCL_LANGS = new Set(["ru", "ja", "ko", "zh", "cn", "th", "hi", "ta", "te", "ml", "kn", "bn", "mr", "pa", "gu", "ur", "id", "ms", "vi", "tl", "km", "lo", "my", "mn", "ne", "si", "kk", "uz", "ky", "tg"]);
-const EXCL_COUNTRIES = new Set(["RU", "JP", "KR", "KP", "CN", "TW", "HK", "MO", "TH", "IN", "ID", "MY", "PH", "VN", "SG", "KH", "LA", "MM", "MN", "NP", "BD", "LK", "PK", "KZ", "UZ", "KG", "TJ", "TM", "BT", "BN", "TL", "MV", "AF"]);
+// Российские, турецкие и азиатские: по языку оригинала и стране производства.
+const EXCL_LANGS = new Set(["ru", "tr", "ja", "ko", "zh", "cn", "th", "hi", "ta", "te", "ml", "kn", "bn", "mr", "pa", "gu", "ur", "id", "ms", "vi", "tl", "km", "lo", "my", "mn", "ne", "si", "kk", "uz", "ky", "tg"]);
+const EXCL_COUNTRIES = new Set(["RU", "TR", "JP", "KR", "KP", "CN", "TW", "HK", "MO", "TH", "IN", "ID", "MY", "PH", "VN", "SG", "KH", "LA", "MM", "MN", "NP", "BD", "LK", "PK", "KZ", "UZ", "KG", "TJ", "TM", "BT", "BN", "TL", "MV", "AF"]);
 const allowed = it => !S.hideRuAsia || !(EXCL_LANGS.has(it.lang) || it.countries.some(c => EXCL_COUNTRIES.has(c)));
 
 async function discover(kind, from, to, withRating, pages = 3) {
@@ -73,6 +101,9 @@ async function discover(kind, from, to, withRating, pages = 3) {
     [dateField + ".gte"]: from, [dateField + ".lte"]: to,
     sort_by: "popularity.desc", include_adult: "false",
   };
+  const gp = genreParam(kind);
+  if (gp === null) return [];
+  if (gp) base.with_genres = gp;
   if (withRating) { base["vote_average.gte"] = S.rating; base["vote_count.gte"] = S.minVotes; }
   const out = [];
   for (let p = 1; p <= pages; p++) {
@@ -111,7 +142,7 @@ function errorView(e) {
 const views = {
   async new(v) {
     $("#title").textContent = "Новинки";
-    $("#sub").textContent = `Вышли за ${S.days} дн. · оценка от ${S.rating}`;
+    $("#sub").textContent = `Вышли за ${S.days} дн. · оценка от ${S.rating}` + (S.genres.length ? ` · ${genreNames()}` : "");
     v.innerHTML = installHint() + spinner();
     const items = await freshReleases();
     const now = Date.now();
@@ -125,12 +156,12 @@ const views = {
     setBadge(0);
     v.innerHTML = installHint() + (items.length
       ? grid(items, i => ({ isNew: freshIds.has(i.kind + i.id) }))
-      : `<div class="empty">За последние ${S.days} дней нет новинок с оценкой от <b>${S.rating}</b>.<br><br>Попробуйте понизить порог в настройках.</div>`);
+      : `<div class="empty">За последние ${S.days} дней нет новинок с оценкой от <b>${S.rating}</b>${S.genres.length ? ` в жанрах: ${genreNames()}` : ""}.<br><br>Попробуйте понизить порог или выбрать другие жанры в настройках.</div>`);
   },
 
   async soon(v) {
     $("#title").textContent = "Скоро выйдет";
-    $("#sub").textContent = "Ближайшие 2 месяца · добавьте в избранное, чтобы получить напоминание";
+    $("#sub").textContent = "Ближайшие 2 месяца" + (S.genres.length ? ` · ${genreNames()}` : " · добавьте в избранное, чтобы получить напоминание");
     const seg = `<div class="seg"><button data-sk="movie" class="${S.soonKind === "movie" ? "on" : ""}">🎬 Фильмы</button><button data-sk="tv" class="${S.soonKind === "tv" ? "on" : ""}">📺 Сериалы</button></div>`;
     v.innerHTML = seg + spinner();
     const items = await discover(S.soonKind, iso(addDays(1)), iso(addDays(60)), false, 3);
@@ -194,8 +225,13 @@ const views = {
         </div>
       </div>
       <div class="field">
-        <label style="display:flex;align-items:center;gap:10px;justify-content:space-between;margin:0"><span>Скрывать российские и азиатские</span><input type="checkbox" id="hideRuAsia" ${S.hideRuAsia ? "checked" : ""} style="width:22px;height:22px;accent-color:var(--acc)"></label>
-        <div class="hint">Фильмы и сериалы из России, Японии, Кореи, Китая, Индии, Таиланда и других стран Азии не показываются в «Новинках» и «Скоро». В поиске они остаются.</div>
+        <label>Жанры</label>
+        <div class="chips" id="genres" style="display:flex;flex-wrap:wrap;gap:6px">${GENRES.map(g => `<button class="gchip" data-g="${g.k}">${g.n}</button>`).join("")}</div>
+        <div class="hint">Отметьте жанры, которые вам интересны. Если ничего не отмечено, показываю все жанры. <a href="#" id="gclear">Сбросить</a></div>
+      </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:10px;justify-content:space-between;margin:0"><span>Скрывать российские, турецкие и азиатские</span><input type="checkbox" id="hideRuAsia" ${S.hideRuAsia ? "checked" : ""} style="width:22px;height:22px;accent-color:var(--acc)"></label>
+        <div class="hint">Фильмы и сериалы из России, Турции, Японии, Кореи, Китая, Индии, Таиланда и других стран Азии не показываются в «Новинках» и «Скоро». В поиске они остаются.</div>
       </div>
       <div class="field">
         <label>Новинки за последние</label>
@@ -226,7 +262,16 @@ const views = {
     const mark = () => kb.forEach(b => b.classList.toggle("on", b.dataset.k === S.kinds));
     mark();
     kb.forEach(b => b.onclick = () => { S.kinds = b.dataset.k; save("kinds"); mark(); });
-    $("#hideRuAsia").onchange = e => { S.hideRuAsia = e.target.checked; save("hideRuAsia"); toast(S.hideRuAsia ? "Российские и азиатские скрыты" : "Показываю всё"); };
+    const gb = v.querySelectorAll("[data-g]");
+    const gmark = () => gb.forEach(b => b.classList.toggle("on", S.genres.includes(b.dataset.g)));
+    gmark();
+    gb.forEach(b => b.onclick = () => {
+      const k = b.dataset.g;
+      S.genres = S.genres.includes(k) ? S.genres.filter(x => x !== k) : [...S.genres, k];
+      save("genres"); gmark();
+    });
+    $("#gclear").onclick = e => { e.preventDefault(); S.genres = []; save("genres"); gmark(); toast("Показываю все жанры"); };
+    $("#hideRuAsia").onchange = e => { S.hideRuAsia = e.target.checked; save("hideRuAsia"); toast(S.hideRuAsia ? "Российские, турецкие и азиатские скрыты" : "Показываю всё"); };
     $("#days").onchange = e => { S.days = +e.target.value; save("days"); };
     $("#minVotes").onchange = e => { S.minVotes = +e.target.value; save("minVotes"); };
     $("#saveKey").onclick = async () => {

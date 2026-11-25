@@ -53,3 +53,5 @@ input[type=range]{width:100%;accent-color:var(--acc)}
 .spin{text-align:center;color:var(--muted);padding:30px}
 .section-h{font-weight:700;margin:18px 4px 10px;font-size:16px}
 .install{background:linear-gradient(135deg,#2a2f3a,#1a1d24);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:12px;font-size:14px}
+.gchip{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:16px;padding:6px 12px;font-size:14px}
+.gchip.on{background:var(--acc);color:#111;border-color:var(--acc);font-weight:600}
