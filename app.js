@@ -15,6 +15,7 @@ const S = {
   days: LS.get("days", 30),
   minVotes: LS.get("minVotes", 20),
   notify: LS.get("notify", false),
+  hideRuAsia: LS.get("hideRuAsia", true), // скрывать российские и азиатские фильмы/сериалы
   favs: LS.get("favs", []),             // [{kind,id,title,poster,date,seen}]
   seen: LS.get("seen", {}),             // id -> время, когда новинку впервые показали
   tab: "new",
@@ -57,9 +58,16 @@ const norm = (x, kind) => ({
   poster: x.poster_path,
   backdrop: x.backdrop_path,
   overview: x.overview,
+  lang: x.original_language || "",
+  countries: x.origin_country || [],
 });
 
-async function discover(kind, from, to, withRating, pages = 2) {
+// Российские и азиатские: по языку оригинала и стране производства.
+const EXCL_LANGS = new Set(["ru", "ja", "ko", "zh", "cn", "th", "hi", "ta", "te", "ml", "kn", "bn", "mr", "pa", "gu", "ur", "id", "ms", "vi", "tl", "km", "lo", "my", "mn", "ne", "si", "kk", "uz", "ky", "tg"]);
+const EXCL_COUNTRIES = new Set(["RU", "JP", "KR", "KP", "CN", "TW", "HK", "MO", "TH", "IN", "ID", "MY", "PH", "VN", "SG", "KH", "LA", "MM", "MN", "NP", "BD", "LK", "PK", "KZ", "UZ", "KG", "TJ", "TM", "BT", "BN", "TL", "MV", "AF"]);
+const allowed = it => !S.hideRuAsia || !(EXCL_LANGS.has(it.lang) || it.countries.some(c => EXCL_COUNTRIES.has(c)));
+
+async function discover(kind, from, to, withRating, pages = 3) {
   const dateField = kind === "movie" ? "primary_release_date" : "first_air_date";
   const base = {
     [dateField + ".gte"]: from, [dateField + ".lte"]: to,
@@ -69,7 +77,7 @@ async function discover(kind, from, to, withRating, pages = 2) {
   const out = [];
   for (let p = 1; p <= pages; p++) {
     const d = await tmdb("/discover/" + kind, { ...base, page: p });
-    out.push(...d.results.map(x => norm(x, kind)));
+    out.push(...d.results.map(x => norm(x, kind)).filter(allowed));
     if (p >= d.total_pages) break;
   }
   return out;
@@ -125,7 +133,7 @@ const views = {
     $("#sub").textContent = "Ближайшие 2 месяца · добавьте в избранное, чтобы получить напоминание";
     const seg = `<div class="seg"><button data-sk="movie" class="${S.soonKind === "movie" ? "on" : ""}">🎬 Фильмы</button><button data-sk="tv" class="${S.soonKind === "tv" ? "on" : ""}">📺 Сериалы</button></div>`;
     v.innerHTML = seg + spinner();
-    const items = await discover(S.soonKind, iso(addDays(1)), iso(addDays(60)), false, 2);
+    const items = await discover(S.soonKind, iso(addDays(1)), iso(addDays(60)), false, 3);
     items.sort((a, b) => a.date.localeCompare(b.date));
     v.innerHTML = seg + (items.length ? grid(items, {}) : `<div class="empty">Ничего не найдено.</div>`);
     v.querySelectorAll("[data-sk]").forEach(b => b.onclick = () => { S.soonKind = b.dataset.sk; render(); });
@@ -186,6 +194,10 @@ const views = {
         </div>
       </div>
       <div class="field">
+        <label style="display:flex;align-items:center;gap:10px;justify-content:space-between;margin:0"><span>Скрывать российские и азиатские</span><input type="checkbox" id="hideRuAsia" ${S.hideRuAsia ? "checked" : ""} style="width:22px;height:22px;accent-color:var(--acc)"></label>
+        <div class="hint">Фильмы и сериалы из России, Японии, Кореи, Китая, Индии, Таиланда и других стран Азии не показываются в «Новинках» и «Скоро». В поиске они остаются.</div>
+      </div>
+      <div class="field">
         <label>Новинки за последние</label>
         <select id="days">${[7, 14, 30, 60, 90].map(d => `<option value="${d}" ${d === S.days ? "selected" : ""}>${d} дней</option>`).join("")}</select>
       </div>
@@ -214,6 +226,7 @@ const views = {
     const mark = () => kb.forEach(b => b.classList.toggle("on", b.dataset.k === S.kinds));
     mark();
     kb.forEach(b => b.onclick = () => { S.kinds = b.dataset.k; save("kinds"); mark(); });
+    $("#hideRuAsia").onchange = e => { S.hideRuAsia = e.target.checked; save("hideRuAsia"); toast(S.hideRuAsia ? "Российские и азиатские скрыты" : "Показываю всё"); };
     $("#days").onchange = e => { S.days = +e.target.value; save("days"); };
     $("#minVotes").onchange = e => { S.minVotes = +e.target.value; save("minVotes"); };
     $("#saveKey").onclick = async () => {
