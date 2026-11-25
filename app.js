@@ -375,13 +375,31 @@ function installHint() {
 }
 
 // ---------- карточка фильма ----------
+const TRAILER_LANG = { uk: "на украинском", ru: "на русском", en: "на английском" };
+// Трейлер: сначала украинский, потом русский, потом английский; трейлер важнее тизера.
+function pickTrailer(videos) {
+  const yt = (videos || []).filter(v => v.site === "YouTube" && v.key);
+  const typeRank = v => ({ Trailer: 0, Teaser: 1 }[v.type] ?? 2);
+  for (const lang of ["uk", "ru", "en"]) {
+    const list = yt.filter(v => v.iso_639_1 === lang).sort((a, b) => typeRank(a) - typeRank(b) || (b.official === true) - (a.official === true));
+    if (list.length && typeRank(list[0]) < 2) return list[0];
+  }
+  return null;
+}
 async function openDetails(kind, id) {
   const sheet = $("#sheet"), body = $("#sheet-body");
   sheet.hidden = false; body.innerHTML = spinner();
   try {
-    const d = await tmdb(`/${kind}/${id}`, { append_to_response: "videos", include_video_language: "ru,en" });
+    const d = await tmdb(`/${kind}/${id}`, { append_to_response: "videos", include_video_language: "uk,ru,en" });
     const it = norm(d, kind);
-    const trailer = (d.videos?.results || []).find(x => x.site === "YouTube" && x.type === "Trailer");
+    let trailer = pickTrailer(d.videos?.results);
+    // У сериалов трейлеры часто привязаны к сезону: ищем в последнем сезоне.
+    if (!trailer && kind === "tv" && d.number_of_seasons) {
+      try {
+        const sv = await tmdb(`/tv/${id}/season/${d.number_of_seasons}/videos`, { include_video_language: "uk,ru,en" });
+        trailer = pickTrailer(sv.results);
+      } catch {}
+    }
     const isFav = S.favs.some(f => f.kind === kind && f.id === id);
     const next = d.next_episode_to_air?.air_date;
     const facts = [
@@ -392,8 +410,11 @@ async function openDetails(kind, id) {
     ].filter(Boolean).join(" · ");
     body.innerHTML = `
       <button class="close" onclick="closeSheet()">✕</button>
-      ${it.backdrop ? `<img class="hero" src="${IMG}w780${it.backdrop}" alt="">` : ""}
+      ${trailer
+        ? `<div class="player"><iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(trailer.key)}?playsinline=1&rel=0" title="Трейлер" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div>`
+        : (it.backdrop ? `<img class="hero" src="${IMG}w780${it.backdrop}" alt="">` : "")}
       <div class="inner">
+        ${trailer ? `<div class="facts">▶ Трейлер ${TRAILER_LANG[trailer.iso_639_1] || ""}</div>` : ""}
         <h2>${esc(it.title)}</h2>
         <div class="facts">${facts}</div>
         ${it.vote ? `<div><b style="color:${it.vote >= S.rating ? "var(--good)" : "var(--text)"}">★ ${it.vote.toFixed(1)}</b> <span style="color:var(--muted)">(${it.votes} голосов)</span></div>` : `<div style="color:var(--muted)">Оценок пока нет</div>`}
@@ -401,7 +422,7 @@ async function openDetails(kind, id) {
         <div class="chips">${(d.genres || []).map(g => `<span class="chip">${esc(g.name)}</span>`).join("")}</div>
         <div class="actions">
           <button class="btn ${isFav ? "ghost" : ""}" id="favBtn">${isFav ? "✓ В избранном" : "🔔 Напомнить о выходе"}</button>
-          ${trailer ? `<a class="btn ghost" href="https://www.youtube.com/watch?v=${trailer.key}" target="_blank" rel="noopener">▶ Трейлер</a>` : ""}
+          ${trailer ? `<a class="btn ghost" href="https://www.youtube.com/watch?v=${encodeURIComponent(trailer.key)}" target="_blank" rel="noopener">▶ В YouTube</a>` : ""}
         </div>
         <p>${esc(it.overview) || "<span style='color:var(--muted)'>Описания пока нет.</span>"}</p>
         <a href="https://www.themoviedb.org/${kind}/${id}" target="_blank" rel="noopener" style="color:var(--muted);font-size:13px">Открыть на TMDB</a>
